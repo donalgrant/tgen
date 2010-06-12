@@ -1,0 +1,1247 @@
+#!/usr/bin/perl -w
+
+#
+# tgen -- a telemetry generator
+#
+# $Revision: 1.2 $
+#
+
+package Random;
+use strict;
+
+sub TIESCALAR { my $s; return bless \$s, shift(); }
+sub FETCH { return int(rand 256) }
+sub STORE { }
+sub DESTROY { }
+
+#######
+
+package Fill;
+use strict;
+
+tie $Fill::random, 'Random';
+
+sub TIESCALAR {
+   my $class = shift;
+   my $fill=shift || "random";
+   return bless \$fill, $class;
+}
+sub FETCH   {
+   my $self=shift;
+   local $_=$$self;
+   return $Fill::random if /ran/;
+   return $_;
+}
+sub STORE   { my $self=shift; $$self=shift;  }
+sub DESTROY { }
+
+######
+
+package main;
+use strict;
+
+use vars qw($I $O $X $F $DEBUG %o);
+
+my %p;  # command file data
+
+# recursive eval -- keep doing eval on $P{}{} items, then
+# do eval on final string
+
+sub r_eval {
+   my $x=shift;
+   print STDERR "r_eval($x)\n" if $DEBUG;
+   my ($k1,$k2);  # we're going to recursively eval all $P{}{}  constructs in $x
+   while ( ($k1,$k2) = $x=~/\$P\{(.*?)\}\{(.*?)\}/ ) {
+     my $r=r_eval($p{$k1}{$k2});
+     $x=~s/\$P\{(.*?)\}\{(.*?)\}/$r/;
+   }
+   my $r=eval($x);
+   print STDERR "r_eval:  error-->$@\n" if $@ and $DEBUG;
+   return $x if $@;
+   print STDERR "r_eval:  no error\n" if $DEBUG;
+   return $x unless defined $r;
+   print STDERR "eval result-->$r\n" if $DEBUG;
+   return $r;
+}
+
+sub subcom_file {
+   my $file=r_eval(shift());
+   my $seek_bytes=r_eval(shift());
+   my $read_bytes=r_eval(shift());
+   my $result;
+   open FILE, "<$file" or die "Can't read from $file:  $!";
+   sysseek FILE, $seek_bytes, 0;
+   sysread FILE, $result, $read_bytes;
+   return $result;
+}
+
+sub seek_file {
+   my $file=r_eval(shift());
+   my $seek_offset=shift;
+   my $seek_bytes=r_eval(shift());
+   my $unpack_type=r_eval(shift());
+   my $seek_cond=shift;
+   open FILE, "<$file" or die "Can't read from $file:  $!";
+   $O=0;
+   my $offset;
+   do {
+     my $result;
+     $offset=r_eval($seek_offset);
+     sysseek FILE, $offset, 0 or return -1;
+     ((sysread FILE, $result, $seek_bytes) == $seek_bytes) or return -1;
+     $X=unpack($unpack_type,$result);
+     print STDERR "o=$O; seek_value=$X\n" if $DEBUG;
+     $O++;
+   } while (not r_eval($seek_cond));
+   return $offset;
+}
+
+sub file_lookup {
+   my $file=r_eval(shift());
+   my $seek_offset=r_eval(shift());
+   my $seek_bytes=r_eval(shift());
+   my $unpack_type=r_eval(shift());
+   open FILE, "<$file" or die "Can't read from $file:  $!";
+   sysseek FILE, $seek_offset, 0 or return 0;  # need better return value
+   my $result;
+   ((sysread FILE, $result, $seek_bytes)==$seek_bytes) or return 0;
+   return unpack($unpack_type,$result);
+}
+
+sub pad_frame {
+   foreach (0..$#::frame) { $::frame[$_]=chr($F) unless defined $::frame[$_]; }
+}
+
+#
+# This was necessary before we corrected the $P{}{}
+# notation to distinguish between value and _value.
+# It should not be necessary now.
+#
+# sub grab_frame {
+#   my $field=shift;
+#   my $offset=r_eval($p{$field}{offset});
+#   my $type=r_eval($p{$field}{type});
+#   pad_frame();
+#   my $format="x$offset $type";
+#   return unpack($format,join('',@::frame));
+# }
+
+use Getopt::Long;
+use Pod::Usage;
+
+GetOptions(\%o,"h|help|man","r|random|random_fill","f|fill=i","n|notify=i",
+	   "q|quiet","v|version");
+
+if ($o{v}) {
+  print STDERR '$Id: tgen.template,v 1.2 2003/02/20 23:40:18 imel Exp$'."\n";
+  exit;
+}
+pod2usage(-verbose=>2) if $o{h};
+pod2usage(-verbose=>0) unless scalar(@ARGV);
+
+
+my $cmd = shift;
+open GEN, "<$cmd" or die "Can't read $cmd:  $!";
+
+my $nFrames     = shift || 1;
+my $first_frame = shift || 0;
+my $last_frame  = $first_frame+$nFrames-1;
+
+my $pulse_notify = $o{n} || 100;
+
+if    (defined $o{r}) { tie $F, 'Fill'; }
+elsif (defined $o{f}) { tie $F, 'Fill', $o{f}; }
+else                  { tie $F, 'Fill', 0; }
+
+my $sd='\s+[#]\s+';
+
+my @field_order;
+
+while (<GEN>) {
+   chomp;
+   while (s/\\$//) { $_.=<GEN>; chomp; }
+   print STDERR "$_\n" if $DEBUG;
+   next if /^[!;#]/;  # comment lines
+   if (/$sd.*$sd.*$sd.*$sd/) {
+       my @a=map { s/^\s*(.+?)\s*$/$1/; $_ } split /$sd/;
+       my $name=shift @a;
+       foreach (qw(_offset _trigger _type _value)) { $p{$name}{$_}=shift @a; }
+       push @field_order,$name;
+   } else {
+     r_eval($_);  # evaluate assignments, etc.
+   }
+}
+
+# have to think about order of evaluation!
+
+# probably specify frame range on command line
+
+$I=$first_frame;
+while ($I<=$last_frame) {
+   @::frame=();
+   my $maxByte=0;
+   foreach my $k (@field_order) {
+     $p{$k}{name}=r_eval($k);
+     $p{$k}{offset}=r_eval($p{$k}{_offset});
+     $p{$k}{trigger}=r_eval($p{$k}{_trigger});
+     if ($p{$k}{trigger}) {
+       $p{$k}{type}=r_eval($p{$k}{_type});
+       $p{$k}{value}=r_eval($p{$k}{_value});
+       next if $p{$k}{offset}<0;  # do a calculation, but don't modify the frame
+       my $s;
+       if (ref($p{$k}{value})) {
+	if (ref($p{$k}{value}) eq "ARRAY") {
+	  $s=pack($p{$k}{type},@{$p{$k}{value}});
+	}
+	else { die "Can't handle ref($p{$k}{value}) for $p{$k}{_value}"; }
+       } else { $s=pack($p{$k}{type},$p{$k}{value}); }
+       my $size=length($s);
+       @::frame[$p{$k}{offset}..$p{$k}{offset}+$size-1]=split('',$s);
+     }
+   }
+   # this padding should be done with a selectable pad character, not just "\0"
+   pad_frame;
+   syswrite STDOUT,join('',@::frame),scalar(@::frame);
+   print STDERR "$I/$last_frame\n" unless (($I+1) % $pulse_notify) || $o{q};
+   $I++;
+}
+
+=head1 NAME
+
+tgen - telemetry generator
+
+=head1 SYNOPSIS
+
+B<tgen> [ options ] F<command_file> [ nframes [ firstframe ] ] >  
+telemetry.dat
+
+B<tgen> -help
+
+=head1 DESCRIPTION
+
+F<tgen> is a program which reads a command file and uses the  
+instructions
+in that file to generate a set of records whose arbitrary format  
+corresponds
+to those instructions.
+
+=head2 Usage
+
+As shown in the SYNOPSIS section above, B<tgen> has one mandatory
+command line argument: the name of the command file.  All other
+command line arguments are optional.  If B<tgen> is executed
+without arguments, a usage message is printed.
+
+=head2 Optional command line arguments
+
+Two numbers may follow the command file name:
+
+=over 4
+
+=item nframes
+
+The number of telemetry records to generate and print to STDOUT.
+If not specified, this number is 1.
+
+=item firstframe
+
+The first frame number, i.e., the value of the $::I global variable
+for the first telemetry record generated.  If not specified, this
+number is 0.
+
+=back
+
+=head2 Command Line Options
+
+The following options may be specified on the command line by being
+prefaced with a single or double-dash, i.e.,
+
+     tgen -h
+
+     tgen --man
+
+Values are specified after the option name, with an optional '=':
+
+     tgen -f 255
+
+     tgen --fill=255
+
+=over 4
+
+=item h|help|man
+
+Print out all online help available.
+
+=item r|random|random_fill
+
+Set the fill byte to be a random number between 0 and 255.  The values returned
+by $::F in this case will also be random on each use of the $::F variable.
+
+=item f|fill
+
+The decimal value (0 to 255) to use to pad each unspecified byte.  This value
+is also placed in the special $::F variable, accessible from the command line.
+
+=item n|notify
+
+Number of pulses to write between each progress message.  Default value is 100.
+
+=item q|quiet
+
+Turns off progress message.
+
+=item v|version
+
+Gives the RCS ID information for this B<tgen>.
+
+=back
+
+=head1 COMMAND FILE
+
+B<tgen> is controlled by the F<command file> -- a series of lines
+and fields with Perl constants and statements to be evaluated (using the
+Perl 'eval' function).  The command file specifies the content of each
+item written by B<tgen> to STDOUT.
+
+=head2 Syntax
+
+Each line in the command file is
+terminated by a newline.  However, lines may be continued with a final
+backslash character:  '\'.  The backslash must be immediately followed
+by a newline in order to serve as a line-continuation character.
+
+The F<command file> contains three kinds of lines:
+
+=over 4
+
+=item Comment lines
+
+Comment lines start with one of the following characters:  #, !, ;.
+(I.e., the pound-sign, the exclamation point, or the semicolon.)  The
+character must be the first character on the line.
+
+   Example:
+
+   # This is a comment field; the pound is in the first column
+   ; This is also a comment
+   ! As is this.
+
+   This is not a commment, but might be ignored.
+
+   # the following assignments never get sent to the Perl interpreter:
+
+   # $::i=3;
+   ! $::i=4;
+   ; $::i=5;
+
+   # the following assignments are parsed by the Perl interpreter;
+   # they are not comments because the comment character is not in
+   # the first column.  They have three different meanings:
+
+     # $::i=7;  # parsed as a comment
+     ; $::i=7;  # parsed as two statements -- null statement and $::i=7
+     ! $::i=7;  # $::i assigned to seven; result negated and ignored.
+
+=item Item specifications
+
+Item specifications consist of a line containing at least four
+occurrences of the field separator, a regex expression:
+
+       \s+[#]\s+
+
+Which is a pound sign with a least one white-space character on both
+sides.  For example:
+
+      ' # ' or '    #   '.
+
+An item specification consists of exactly five fields, which means
+there should be exactly four separators.  Currently, additional fields
+after the fifth will be ignored.  This behavior is not guaranteed long-term.
+
+The content of the Item specification is:
+
+   item_name # byte_offset # trigger_value # pack_type # value
+
+These fields are explained below.  Each of the fields is actually
+Perl eval'd, so that they can be any interpretable Perl statement,
+not just a constant.  These fields are evaluated for each record
+written, and are evaluated in the order that they appear in the
+command file.  So if some of the fields refer to the values of
+others (i.e., through the $P{}{} syntax, see below), then the
+order in which the items are specified is significant.  The order
+need not be the order in which the items appear in the output
+record.
+
+=over 8
+
+=item name
+
+The name of the item to be written for this specification.  This
+is useful not only for documentation in the command file, but can
+also be used in other other fields to refer to the values of this
+and the other fields in this specification using the $P{}{} syntax
+(see below).  This name should be unique.  One should also avoid
+certain Perl reserved functions, like "exit" and "die".
+
+=item offset
+
+The offset into the current record at which to start writing the
+value of this item.  The field uses a zero-offset, so that the
+first byte written is at a byte_offset of 0.  Not all byte_offsets
+need be specified -- B<tgen> will assume some packing (with nulls
+or other values) for fields which have not been specified.  If two items
+have the same byte_offset, or overlap each other, then in the
+overlapping locations, the last item specified in the command
+file will have precedence.
+
+Like every other field, this one is eval'd to obtain
+its value, so that variables are allowed here.  This could be useful
+in at least two cases:
+
+   1) random record sizes -- see the example in the COMMAND FILE EXAMPLES,
+      "Random record lengths" section.
+
+   2) calculating an offset -- for example, a fixed offset from some
+      other field.  Or even, for convenience, using an incremented
+      global variable to keep track of the offset for a series of
+      item specifications:
+
+        # example of calculating an offset:
+        a # $::o=0; # 1 # 'a' # 'a'
+        b # ++$::o; # 1 # 'a' # 'b'
+        c # ++$::o; # 1 # 'a' # 'c'
+        # This is a bit risky, since the increment
+        # happens on a different line than that
+        # which drives the increment, namely the
+        # pack type of the previous line.
+
+Only non-negative values of the offset are interpreted as actual
+offset values into the current record.  A negative value is interpreted
+to mean "evaluate the type and value fields, but do not pack the result
+or incorporate the result into the output stream".  This means that
+the value field can be used as a variable which is re-evaluated on
+every output record but not used if the the offset is less than zero:
+
+        # example of non-output value calculation
+        $::prf=400.0
+        time # -1 # 1 # X # $::I/$::prf
+        # now $P{time}{value} can be used elsewhere to
+        # get the current time.  Note that the pack
+        # type is ignored, so the unquoted X is fine.
+
+
+=item trigger
+
+The third column of the item specification field -- this column controls
+whether or not the following things will occur for a given record:
+
+   1) Evaluation of the value field to obtain the value
+   2) Evaluation of the type field to obtain the pack type
+   3) Assignment of the packed value to the output record
+
+If the trigger field evaluates to false (0, "0" or undef) then these
+things do not occur, otherwise they do.  (A Perl 'true' means a
+non-zero number, non-empty string, and not the string "0".
+For example, the strings "00" and "0  not empty" both eval to true.)
+
+The trigger can be used to provide convenient record-by-record
+alternative values. (See the COMMAND FILE EXAMPLES:
+"Modifying behavior record-by-record.)
+
+=item type
+
+Data format to write the value.  The format is directly fed to the
+Perl B<pack(1)> function.  See the documentation of that function
+for a complete description.  Note that this is a string field, and
+must therefore be quoted.  A common error is to specify the field
+as:
+
+     a_field # 0 # 1 # L   # 526  # error
+
+instead of
+
+     a_field # 0 # 1 # 'L' # 526  # 'L' is okay (quoted)
+
+or
+
+     a_field # 0 # 1 # "L" # 526  # "L" also okay.
+
+The first of these two is an error. The most common values used in  
+B<tgen> command files are:
+
+                L  -- unsigned long  (4 bytes)
+                l  -- signed   long  (4 bytes)
+		
+                S  -- unsigned short (2 bytes)
+                s  -- signed   short (2 bytes)
+            	
+                C  -- unsigned char  (1 byte)
+                c  -- signed   char  (1 byte)
+
+                a# -- null-padded binary string of at most # bytes
+                      (for example, 'a4' or "a256")
+
+                f  -- single-precision float
+                d  -- double-precision float
+
+If any of the L,l,S,s,C,c,f or d fields gets a numeric modifier immediately
+after it (i.e., 'f5') then the value should evaluate to a reference to an
+array of that number of the appropriate items.  For example:
+
+      # note the continuation characters in the following specification
+
+      complex_16 # 0 \
+                 # 1 \
+                 # 'd2' \
+                 # my $a=45.0/57.3; [cos($a),sin($a)]
+
+(In Perl, the []-notation gives an anonymous reference to an array.)
+
+=item value
+
+The value to be evaluated and recorded for this item.  This may be
+any valid set of Perl code.  In the case of multiple statements  
+(separated by a semi-colon), the last statement's value will be the one used.
+
+=back
+
+=item Perl statements
+
+Other lines in the command file are evaluated at the beginning of B<tgen>
+execution as Perl statements.  They are only evaluated once, rather than
+once per output record.  They are evaluated in the order that they are
+written in the command file, and may be used to set up constants.  For
+example:
+
+       $::PN = 0x03915ed3;  # PN sequence constant
+       $::DEBUG = 1;        # specify whether we want debugging messages
+
+       # the following statement will only execute once, no
+       # matter how many records are written to STDOUT.
+
+       print STDERR "Debugging is ON!\n" if $::DEBUG;
+
+This set of statements specifies values for the global symbols
+PN and DEBUG so that they can be used in other eval'd statements.
+Note that if the :: notation were ommitted, the symbols would become
+local, and wouldn't be available to any other statements, since the
+statements are eval'd one at a time.
+
+=back
+
+=head2 Built-in functions
+
+B<tgen> provides a few "built-in" functions to handle things
+like reading data from files.
+
+=over 4
+
+=item subcom_file( filename, offset_bytes, read_bytes )
+
+This is the primary mechanism for incorporating sub-commutated data
+in a binary file.  Its three arguments specify which file to read,
+where in the file to begin reading and how many bytes to read.
+The binary bytes are returned in a string suitable for writing to
+a record with the "a#" pack type.  See COMMAND FILE EXAMPLES:
+"Subcommutated data" for an example.
+
+=item file_lookup( filename, offset_bytes, read_bytes, unpack_type )
+
+This function does the same as the subcom_file, except that the
+data is unpacked and returned as the unpacked value, rather than
+the raw binary byte string which subcom_file returns.  See the
+Perl pack(1) documentation ('perldoc -f pack') for a complete list
+of unpack_type specifications.  See COMMAND FILE:  Syntax  (type)
+for the most commond type values.
+
+=item seek_file( filename, offset_bytes, read_bytes, unpack_type, cond )
+
+This function does the same as the file_lookup function, except that
+it keeps scanning through the file at intervals of "offset_bytes"
+looking for an value of the read_bytes data (unpacked via the
+unpack_type) which satisfies the seek termination condition "cond".
+
+seek_file returns the offset into the file which successfully satisfied
+the search condition, rather than return the value which satisfied
+that condition.  (The value could then easily be obtained with a call
+to either subcom_file or file_lookup.)
+
+seek_file can be used, for example, to look up a data value to use
+after a certain time has been achieved, especially when the mapping
+between the time and the record counter is not linear.
+
+The variables $::X and $::O are used by seek_file
+(see Built-in variables, next section) to specify the termination
+condition and help specify the offset into the file, respectively.
+
+$::X is the value unpacked by reading read_bytes and calling unpack(1)
+with the unpack_type.  $::O is the incremented upon each read attempt.
+Therefore, typically the offset_bytes is specified as a function
+of $::O:  Common examples of offset_bytes would be
+
+   '$::record_length * $::O'
+   '$::record_length * $::O + $::fixed_offset'
+
+where $::record_length and $::fixed_offset are defined elsewhere.
+
+For example, if 'ant.dat' is a binary data file where each record
+consists of two floats (real*4):  an angle and an antenna gain (in dB),
+then the following:
+
+     seek_file('ant.dat','8*$::O',4,'f','$::X>$::I/10.0')
+
+will return the byte_offset into the file such that the angle
+is greater than the current record number divided by 10.  If the  
+condition
+were being specified on the gain instead of the antenna angle,
+then the following could be used:
+
+    seek_file('ant.dat','8*$::O+4',4,'f','$::X>-30.0')
+
+to find the byte offset into the file of the first antenna gain
+greater than -30 dB.  Note that the offset returned is the successful
+value of '8*$::O+4' (for some integer value of $::O), not just
+'8*$::O'.  In other words, seek_file doesn't have any notion of the
+record length of the file -- it is just repeatedly evaluating the
+offset_bytes argument for increasing values of $::O.
+
+=back
+
+=head2 Built-in variables
+
+There are a few "built-in variables" available from, and used by,  
+B<tgen>.
+Since they are defined by B<tgen>, they should not be re-defined in a
+command file.
+
+B<tgen> operates under the "use strict" and "-w" options of Perl, so
+the variables must be accessed in the command file using the full
+"package notation", i.e., $::I rather than just $I.
+
+=over 4
+
+=item $::I
+
+This is the current value of the record counter.  It starts from either
+zero, or optionally, the value of the second command-line argument.  It
+is incremented and tested within the main execution loop to determine
+whether or not B<tgen> has completed execution.  The test value for
+$::I is the first record plus one minus the number of records specified.
+(The number of records is the first optional command line argument, and
+is one by default.)
+
+One would not normally assign a value to $::I, though accessing it is
+very useful for generating counters and functions of record number.  One
+conceivable exception is some sort of "Turing machine" mode, where
+the command file explicitly sets $::I to determine some termination
+condition other than the number of records written.  For example:
+
+     random     # 0  # 1 # 'f' # rand(1.0)
+     finished   # -1 # 1 # X   # --$::I if $P{random}{value}<0.5
+
+will generate a variable number of random numbers, but with the
+number of random numbers greater than or equal to 0.5 specified
+on the command line.
+
+=item $::F
+
+This is actually a special "Tied" variable used for the fill byte.
+It returns either 0 (by default), the value specified on the
+command line with the '-f' option, or if the '-r' option has been
+set, a random byte value.  See COMMAND FILE EXAMPLES:
+"Modifying behavior record-by-record" for an example of the
+use of this variable.
+
+=item $::X
+
+This is the value unpacked from the file during inside the
+seek_file subroutine.  It is used within the argument list
+to seek_file to specify the termination of seek.  See
+COMMAND FILE EXAMPLES:  "Time-based data file" for an
+illustration of its use.
+
+=item $::O
+
+This is the number of reads performed within a seek_file
+subroutine call.  It could be used as part of the
+termination condition.  See COMMAND FILE EXAMPLES:
+"Time-based data file" for an illustration.
+
+=item $::DEBUG
+
+This sets the diagnostic level of B<tgen>.  It can be
+set record-by-record using an item specification so that debugging
+can be turned on just when it is needed.  See the DIAGNOSTICS
+section for a description of the B<tgen> diagnostics currently
+available.
+
+=back
+
+=head2 The $P syntax
+
+A pseudo-hash table is set up by B<tgen> for use in the command file,
+using the syntax:
+
+     $P{item_name}{item_field}
+
+where item_name is the name specified in the first column an item
+specification, and item_field is one of the columns in the item
+specification.  Each column is named; these names are, in order:
+name, offset, trigger, type and value.  See the descriptions of these
+fields above in the COMMAND FILE "Syntax" section.
+
+In each case, a entry in the $P{item_name}{} table is also available
+for the column of a given name with a pre-pended underscore, e.g.,
+$P{field1}{_value}.  This provides access to the field item to be
+evaluated (and evaluates that function again), rather than just making
+use of the value.  This would be rarely used.  An illustration of the
+difference is shown in the COMMAND FILE EXAMPLES section.
+
+For example, in the following item specification:
+
+     cheshire_counter # 0 # int(rand(1.0)*2.0)-1 # 'L' # $::I
+
+the following are the $P{}{} syntax fields:
+
+     $P{cheshire_counter}{name}     = cheshire_counter
+     $P{cheshire_counter}{offset}   = 0
+     $P{cheshire_counter}{trigger}  = 0 or 1 (depends on rand(1.0) call
+     $P{cheshire_counter}{type}     = 'L'
+     $P{cheshire_counter}{value}    = current value of $::I variable
+
+     $P{cheshire_counter}{_name}    = cheshire_counter
+     $P{cheshire_counter}{_offset}  = 0
+     $P{cheshire_counter}{_trigger} = int(rand(1.0)*2.0)
+     $P{cheshire_counter}{_type}    = 'L'
+     $P{cheshire_counter}{_value}   = $::I
+
+=head1 COMMAND FILE EXAMPLES
+
+It is usually easier to learn by doing and by tweaking examples rather
+than by trying to parse the grammar defined above to generate command
+files by scratch.  These examples have all been placed in the examples
+folder of the tgen distribution.  Since the number of records is
+specified on the command line rather than in the command file, the
+number has been arbitrarily selected to be 100 for each of these  
+examples.
+
+=head2 Null Data File, fixed record length
+
+   Command File:
+
+     #
+     # Null data file  --  generates 1024-byte null-valued records.
+     #
+
+     # this following item specification gives only the value of the
+     # final byte (byte 1023, with is the 1024th zero-offset byte).
+     # the bytes at all earlier byte offsets are null-padded automatically.
+
+     data # 1023 # 1 # 'C' # 0
+
+     # end of command file
+
+   Example execution:
+
+     tgen null_data.tgen 100 > null_data.out
+
+=head2 Arbitrarily-filled data file, fixed record length
+
+   Command File:
+
+     #
+     # Arbitrarily-filled data file  --  generates 1024-byte records
+     #
+
+     # this following item specification gives only the value of the
+     # final byte (byte 1023, with is the 1024th zero-offset byte);
+     # the bytes at all earlier byte offsets are padded automatically.
+     # $::F is a special variable in tgen which contains the value
+     # of the fill byte.  The value is zero by default, but can
+     # be specified on the command line as any other byte value using
+     # the -f flag, or can be made random using the -r flag.
+
+     data # 1023 # 1 # 'C' # $::F
+
+     # end of command file
+
+   Example execution:
+
+     tgen -f 255 arb_data.tgen 100 > railed.dat
+
+     tgen -r arb_data.tgen 100 > random.dat
+
+=head2 Random record lengths
+
+   Command File:
+
+     #
+     # random record lengths
+     #
+
+     # we make use of the fact that the byte-offset is actually
+     # a Perl-evaluated statement for each pulse, so that it
+     # can vary from one pulse to the next.  We'll write random
+     # or fixed value data (using the -r or -f flag on the command line)
+     # but have a fixed "PN-Sequence" for the start of the records.
+
+     pn   # 0                 # 1 # 'L' # 0x03915ed3
+
+     # the following item gives a random byte offset between 4
+     # (so that we don't try to over-write the pn-sequence)
+     # and 255 (maximum 256-byte record length).  The value
+     # is the same as the fill byte value.
+
+     data # int(rand()*252)+4 # 1 # 'C' # $::F
+
+     # end of command file
+
+   Example execution:
+
+     tgen random_size.tgen 100 > random_size.dat
+
+=head2 Counters
+
+In this and some of the examples below, we will use pick(1) to look at the
+resulting data.  pick(1) is a utility for examining binary data in arbitrary
+format.  (See 'perldoc pick' for more information.  B<pick> should be
+available from the same source as B<tgen>.)
+
+   Command File:
+
+     #
+     # Generate different counters
+     #
+
+     every_pulse_byte       # 0 # 1 # 'C' # $::I % 256
+     every_other_pulse_byte # 1 # 1 # 'C' # ($::I/2) % 256
+     count_to_4             # 2 # 1 # 'C' # ($::I % 4) + 1
+     every_pulse_long       # 3 # 1 # 'L' # $::I
+
+     # end of command file
+
+   Example Output:
+
+     [narnia:~] imel% tgen counter.tgen 10 250 | pick 7 -q 3bd ud
+     250 125 3 250
+     251 125 4 251
+     252 126 1 252
+     253 126 2 253
+     254 127 3 254
+     255 127 4 255
+     0 128 1 256
+     1 128 2 257
+     2 129 3 258
+     3 129 4 259
+
+=head2 Using the value and _value fields
+
+Usually, the value field is the one desired when the $P{}{} notation
+is used.  The exception would be when an independent evaluation of the
+_value field is really called for.  This is rare in practice.
+
+   Command file:
+
+     #
+     # Contrast the value and _value $P{}{} fields
+     #
+
+     random_number # 0 # 1 # 'f' # rand(1.0);
+
+     $::COUNT1=0;  # this does a count on the rand(1.0) function
+     $::COUNT2=0;  # this one will be what we were probably wanting
+
+     value_1       # 4 # 1 # 'S' # $::COUNT1++ if  \
+                    $P{random_number}{_value}>0.5; \
+                    $::COUNT1;
+     	
+     value_2       # 6 # 1 # 'S' # $::COUNT2++ if  \
+                    $P{random_number}{value}>0.5;  \
+                    $::COUNT2;
+
+     # The difference between the two is that _value does an 'eval' on the
+     # content of the value field (in this case, the rand(1.0) function),
+     # while value gives the result of the eval when the item was generated
+     # for this record.
+
+     # end of command file
+
+   Example Output:
+
+     [narnia:~] imel% tgen value_v_result.tgen 10 | pick 8 -q f 2wd
+     0.507108 1 1
+     0.461526 2 1
+     0.977323 3 2
+     0.0334859 4 2
+     0.165522 5 2
+     0.754016 5 3
+     0.455226 6 3
+     0.163245 7 3
+     0.0672464 7 3
+     0.0247447 7 3
+
+In this case, we see that value_2 gives us what we probably intended,
+namely, a count of how often the value of the random_number field is
+greater than 0.5.  Meanwhile, the value_1 field seems to be returning
+something completely unrelated, because it is based on a separate (and
+unreported) call to the rand() function through an eval of the _value
+field of random_number.
+
+=head2 Modifying behavior record-by-record
+
+   Command file:
+
+     zero_fill   # -1 # ($::I%3)==0  # X # $::F=0
+     rail_fill   # -1 # ($::I%3)==1  # X # $::F=255
+     rand_fill   # -1 # ($::I%3)==2  # X # $::F="random";
+
+     pulse_number  # 0  # 1  # 'C' # $::I
+     last_byte     # 9  # 1  # 'C' # $::F
+
+     # Note that the -1 offset for the first three item specs
+     # means that the fields are only evaluated when the trigger field is true,
+     # but not written.  The pack-type is ignored in this case.
+
+     # end of command file
+
+   Example Output:
+
+     [narnia:~] imel% tgen cond_fill.tgen 10 | pick 10 -q 10bx
+     00  00  00  00  00  00  00  00  00  00
+     01  ff  ff  ff  ff  ff  ff  ff  ff  ff
+     02  82  ac  02  d5  12  e3  54  72  1a
+     03  00  00  00  00  00  00  00  00  00
+     04  ff  ff  ff  ff  ff  ff  ff  ff  ff
+     05  30  b1  a5  74  6c  96  c8  95  12
+     06  00  00  00  00  00  00  00  00  00
+     07  ff  ff  ff  ff  ff  ff  ff  ff  ff
+     08  d0  7d  92  04  87  cf  46  d0  6b
+     09  00  00  00  00  00  00  00  00  00
+
+Here, the output bytes are printed in hex to make the spacing nicer.
+
+=head2 Subcommutated data
+
+In the example below, not only subcommutated data is illustrated, but  
+also using parameters instead of constants (e.g., the length of the subcommutated
+header) and the binary data pack value.  Note that the parameterized values
+could conceivably change from pulse to pulse.  For example, data could be
+read from a list of files, rather than just one file.  (See the example
+of modifying the behavior record-by-record, above.)
+
+   Command File:
+
+     #
+     # Generate a "subcommutated header" -- use this command file
+     #
+
+     $::SUB_LENGTH=500;                 # size (bytes) of subcom data record
+     $::SUB_BYTES=10;                   # number of subcom bytes per record
+     $::FILE='../examples/subcom.tgen'; # use this file for example subcom data
+
+     counter   # 0 # 1 # 'L'   # $::I
+     sub_index # 4 # 1 # 'S'   # ($::I * $::SUB_BYTES) % $::SUB_LENGTH
+     sub_data  # 6 # 1 # 'a10' # subcom_file($::FILE,$P{sub_index}{value},10)
+
+     # end of command file
+
+   Example Output:
+
+     ~>tgen -q ../examples/subcom.tgen 20 190 | pick 16 -q ud wd 10cc
+     190 400 1   #   ' a 1 0 '
+     191 410 #   s u b c o m _ f
+     192 420 i l e ( $ : : F I L
+     193 430 E , $ P { s u b _ i
+     194 440 n d e x } { r e s u
+     195 450 l t } , 1 0 ) nl nl #
+     196 460   e n d   o f   c o
+     197 470 m m a n d   f i l e
+     198 480 nl nl nul nul nul nul nul nul nul nul
+     199 490 nul nul nul nul nul nul nul nul nul nul
+     200 0 # nl #   G e n e r a
+     201 10 t e   a   " s u b c
+     202 20 o m m u t a t e d
+     203 30 h e a d e r "   - -
+     204 40   u s e   t h i s
+     205 50 c o m m a n d   f i
+     206 60 l e nl # nl nl $ : : S
+     207 70 U B _ L E N G T H =
+     208 80 5 0 0 ;
+     209 90
+
+Note that here the first pulse was set to 190 so that we can examine
+what happens when the subcommutated data index runs past the end of
+the full.  Evidently, null values are encoded.  Note that these are
+NOT currently affected by the value of the fill variable, $::F.
+
+=head2 Generating Binary Data Records
+
+B<tgen> can be used to do some of the simpler kinds of simulation.
+For more complicated simulation (for example, a point-target simulator)
+B<tgen> would be to slow and perhaps to cumbersome to do all of the
+calculations, but could be used as a "formatter" to package the
+binary data calculated elsewhere with auxiliary files, motion files,
+etc., to simulate a multiplexed data stream.
+
+In this example, we simulate the caltone sweep generated as part of
+an AIRSAR calibration sequence:  we step through some number of
+caltone frequencies, for a fixed number of pulses at a time.
+
+This example illustrates the use of a Perl array (@::f) and also the
+use of the Perl map function inside an anonymous array reference '[]'
+to generate an array of sample values for a pack type of 'CN', where
+N is the number of values in the array.
+
+   Command File:
+     #
+     # Generate a binary data file
+     #
+
+     # some parameters to define a digital system
+
+     $::pi=3.141592654;                         # the (approx) value of pi
+     $::nf=10;                                  # number of caltones to generate
+     $::f0=5.0e6;                               # minimum caltone frequency
+     $::f_max=35.0e6;                           # maximum caltone frequency
+     $::df=($::f_max-$::f0)/($::nf-1)           # frequency step
+
+     @::f = map { $::f0+$_*$::df } (1..$::nf);  # array of frequencies
+
+     $::fs=90.0e6;                              # sampling rate
+     $::a=2.0*$::pi/$::fs;                      # convenience coefficient
+
+     $::ns=256;                                 # number of samples to generate
+
+     # below we have two item specifications:
+     # 'calfreq' calculates which caltone frequency
+     # we should use for the current pulse, and
+     # data actually generates the sample values
+     # to be written for the current pulse, using
+     # the caltone frequency calculated previously.
+
+     calfreq # -1 # 1 # X # ($::I/32) % $::nf   # 32 pulses per caltone
+
+     data # 0 # 1 # "C$::ns" # [ map { \
+           128+int(128.0*cos($::a*$_*$::f[$P{calfreq}{value}])) \
+                                   } (1..($::ns-1)) ]
+
+     # end of command file
+
+   Example Output:
+
+     tgen calsweep.tgen 500 > calsweep.dat
+
+The best way to look at binary data like this is with an image display
+program such as Scott Shaffer's mdx:
+
+     mdx -b1 calsweep.dat 256
+
+One Unix freeware alternative is ImageMagick:
+
+     convert -depth 8 -size 256x500 gray:calsweep.dat calsweep.jpg
+
+which can then be displayed by any image display application:
+
+     xv calsweep.jpg
+
+=head1 RETURN VALUE
+
+On successful completion, B<tgen> returns 0 and has written the
+requested data to STDOUT.
+
+=head1 ERRORS
+
+B<tgen> will die with an error message in the following situations:
+
+=over 4
+
+=item Can't read from (filename)
+
+This is generated by the built-in functions (subcom_file, seek_file,
+file_lookup) when the filename passed in the argument list corresponds
+to a file which cannot be opened for read.  This message can also
+be generated when the command file cannot be opened for read.
+
+=item Can't handle XXXXX for YYYYY
+
+This message indicates that a reference to something other than
+an ARRAY was returned in the value field of an item specification, and
+a non-negative offset value was specified, so that the item is
+expected to be interpreted in a pack statement.
+
+=back
+
+=head1 FILES
+
+See the COMMAND FILE and COMMAND FILE EXAMPLES sections for
+descriptions of the command file.
+
+=head1 SEE ALSO
+
+pick(1), built-in Perl function pack(1).
+
+=head1 NOTES
+
+The following is a list of some of the "To Do" items for B<tgen>:
+
+   o Change the way file reading is handled so that files are only
+     opened once and closed once during execution, instead of
+     once per record read and written.
+
+   o Provide more diagnostics, especially for file errors.
+
+=head1 CAVEATS
+
+One of the current difficulties with B<tgen> is the lack of diagnostics
+for syntax and other kinds of errors in the Perl parsing of the
+command file.  The next section tries to provide some preliminary
+help in that regard.
+
+=head2 Most common "gotchas":
+
+   o Unquoted pack type:  the type in the fourth field of each item
+     specification must be quoted:  'L' or "L", not L.
+
+   o Remember that to 'interpolate' a Perl variable within a string,
+     one must use double quotes, rather than single quotes:  'L$::n'
+     will not work; one must write "L$::n".
+
+   o Variables must have a full package specification.  In other words,
+     if a variable is to be used across multiple item specifications,
+     it must be in the form $::j, not just $j.  Otherwise, it will be
+     uninitialized.
+
+   o Similar to the above, a "my $i" declaration will only hold within
+     a particular line of the command file, and will not be valid
+     for any other line.  This is because each line in the file is
+     eval'd separately.
+
+   o Since each line is eval'd separately, a multi-line statement
+     must be continued using a backslash as the last character
+     on the line.
+
+   o There should be no quotes for the items inside the brackets of
+     the $P{}{} syntax.  This is a special syntax interpreted directly
+     by B<tgen>, and not by Perl.  So, for example, $P{pn}{value} is
+     correct, not $P{'pn'}{'value'} or $P{"pn"}{trigger}, etc.
+
+   o The $P{}{} syntax is really more of a recursive macro substitution
+     than a variable interpolation.  So, for example, the value
+     may need to be parenthesised in order to avoid an error.  E.g.:
+     sqrt(($P{time}{value})**2) has the extra ()'s to avoid a syntax
+     error or confusion in the case of a negative $P{time}{value}.
+
+   o Any diagnostic messages in the command file should be sent either
+     to an explicit file or to STDERR, NOT to STDOUT, since STDOUT is
+     where the output data are written.
+
+   o Since the item specifications are eval'd one (possibly continued)
+     line at a time, any reference to other variables or the $P{}{}
+     syntax must be resolved by lines earlier in the file, or will
+     remain unresolved and generate an error, possibly unreported.
+
+   o Since the Perl statements in the file which are not item
+     specifications are eval'd only once at the beginning of B<tgen>
+     execution, i.e., prior to the eval loop for the item specifications,
+     the $P{}{} syntax will lead to uninitialized values, even if the
+     statements occur later in the file than the item specifications.
+     Moreover, the $::I variable is not defined for the non-item-specification
+     statements.
+
+=head1 DIAGNOSTICS
+
+What diagnostics exist so far in B<tgen> are turned on by setting the
+value of the $::DEBUG variable to true.  Since B<tgen> is still relatively
+early in development, the diagnostics are rapidly varying, but some
+current ones are:
+
+=over 4
+
+=item r_eval(...)
+
+Provides the argument list to the r_eval function
+
+=item r_eval:  error-->...
+
+Reports the end of a recursive eval chain where we've gone one eval "too far".
+
+=item r_eval:  no error
+
+Successful eval on argument list.
+
+=item o=XX; seek_value=XXX
+
+In seek_file subroutine, reports value found at offset against which
+a termination test is to be made.
+
+=item Command file is printed to STDERR
+
+=back
+
+=head1 PORTABILITY
+
+=head2 Localized Parameters:
+
+B<tgen> is a template version which can be localized using the standard
+F<Makefile.PL> script.  The parameters localized are:
+
+=over 4
+
+=item perl
+
+Which version of perl to use, specified on the shebang (#!) line.
+(Here, F</usr/bin/perl>.)
+
+=back
+
+=head2 Local Packages:
+
+None.
+
+=head2 Perl Packages:
+
+Getopt::Long(1), Pod::Usage(1).
+
+=head1 BUGS
+
+None reported yet.
+
+Send bug reports to imel@jpl.nasa.gov
+
+=head1 RESTRICTIONS
+
+None.
+
+=head1 AUTHOR
+
+David A. Imel, 16 February 2003
+
+=head1 HISTORY
+
+(Now checked into github:donalgrant/tools.)
+
+The current version is $Revision: 1.2 $
+
+$Log: tgen.template,v $
+Revision 1.2  2003/02/20 23:40:18  imel
+This is now a decently working version:
+
+   o improved $P{}{} notation -- now no need for grab_frame subroutine
+   o Provided almost complete POD, with several command file examples
+   o Got better relationship between Random and Fill packages.
+
+Still needs:
+
+   o Better diagnostics (should also borrow debugMsg function)
+   o Better file access (open only once, rather than once per record!)
+
+Revision 1.1.1.1  2003/02/16 23:32:35  imel
+This is the preliminary version of tgen -- the telemetry generator.
+Some of the what is missing so far:
+   1) POD
+   2) Better way of handling files so that they are only opened
+      once.  Should probably go to using Perl objects for these.
+
+
+
+=cut
