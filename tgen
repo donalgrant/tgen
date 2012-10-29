@@ -23,7 +23,7 @@ tie $Fill::random, 'Random';
 
 sub TIESCALAR {
    my $class = shift;
-   my $fill=shift || "random";
+   my $fill=shift // "random";
    return bless \$fill, $class;
 }
 sub FETCH   {
