@@ -1,0 +1,34 @@
+#
+# Generate a binary data file
+#
+
+# some parameters to define a digital system
+
+$::pi=3.141592654;                         # the (approx) value of pi
+$::nf=10;                                  # number of caltones to generate
+$::f0=5.0e6;                               # minimum caltone frequency
+$::f_max=35.0e6;                           # maximum caltone frequency
+$::df=($::f_max-$::f0)/($::nf-1)           # frequency step
+
+@::f = map { $::f0+$_*$::df } (1..$::nf);  # array of frequencies
+
+$::fs=90.0e6;                              # sampling rate
+$::a=2.0*$::pi/$::fs;                      # convenience coefficient
+
+$::ns=256;                                 # number of samples to generate
+
+# below we have two item specifications:
+# 'calfreq' calculates which caltone frequency
+# we should use for the current pulse, and
+# data actually generates the sample values
+# to be written for the current pulse, using
+# the caltone frequency calculated previously.
+
+calfreq # -1 # 1 # X # ($::I/32) % $::nf   # 32 pulses per caltone
+
+data # 0 # 1 # "C$::ns" # [ map { \
+      128+int(128.0*cos($::a*$_*$::f[$P{calfreq}{value}])) \
+                              } (1..($::ns-1)) ]
+
+# end of command file
+

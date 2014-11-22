@@ -1,0 +1,15 @@
+#
+# Arbitrarily-filled data file  --  generates 1024-byte records
+#
+
+# this following item specification gives only the value of the
+# final byte (byte 1023, with is the 1024th zero-offset byte);
+# the bytes at all earlier byte offsets are padded automatically.
+# $::F is a special variable in tgen which contains the value
+# of the fill byte.  The value is zero by default, but can
+# be specified on the command line as any other byte value using
+# the -f flag, or can be made random using the -r flag.
+
+data # 1023 # 1 # 'C' # $::F
+
+# end of command file

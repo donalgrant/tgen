@@ -1,0 +1,17 @@
+#
+# Change fill behavior on every third pulse
+#
+
+zero_fill   # -1 # ($::I%3)==0  # X # $::F=0
+rail_fill   # -1 # ($::I%3)==1  # X # $::F=255
+rand_fill   # -1 # ($::I%3)==2  # X # $::F="random";
+
+pulse_number  # 0  # 1  # 'C' # $::I
+last_byte     # 9  # 1  # 'C' # $::F
+    
+# Note that the -1 offset for the first three item specs 
+# means that the fields are only evaluated when the trigger field is true, 
+# but not written.  The pack-type is ignored in this case.
+
+# end of command file
+

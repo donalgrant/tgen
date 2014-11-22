@@ -1,0 +1,20 @@
+#
+# random record lengths
+#
+
+# we make use of the fact that the byte-offset is actually
+# a Perl-evaluated statement for each pulse, so that it
+# can vary from one pulse to the next.  We'll write random
+# or fixed value data (using the -r or -f flag on the command line) 
+# but have a fixed "PN-Sequence" for the start of the records.
+
+pn   # 0                 # 1 # 'L' # 0x03915ed3
+
+# the following item gives a random byte offset between 4 
+# (so that we don't try to over-write the pn-sequence)
+# and 255 (maximum 256-byte record length).  The value
+# is the same as the fill byte value.
+
+data # int(rand()*252)+4 # 1 # 'C' # $::F
+
+# end of command file

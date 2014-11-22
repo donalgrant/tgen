@@ -1,0 +1,11 @@
+#
+# Null data file  --  generates 1024-byte null-valued data items.
+#
+
+# this following item specification gives only the value of the
+# final byte (byte 1023, with is the 1024th zero-offset byte).
+# the bytes at all earlier byte offsets are null-padded automatically.
+
+data # 1023 # 1 # 'C' # 0
+
+# end of command file

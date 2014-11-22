@@ -1,0 +1,11 @@
+#
+# Generate different counters
+#
+
+every_pulse_byte       # 0 # 1 # 'C' # $::I % 256
+every_other_pulse_byte # 1 # 1 # 'C' # ($::I/2) % 256
+count_to_4             # 2 # 1 # 'C' # ($::I % 4) + 1
+every_pulse_long       # 3 # 1 # 'L' # $::I
+
+# end of command file
+

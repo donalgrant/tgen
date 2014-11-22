@@ -1,0 +1,14 @@
+#
+# Generate a "subcommutated header" -- use this command file
+#
+
+$::SUB_LENGTH=500;                 # size (bytes) of subcom data record
+$::SUB_BYTES=10;                   # number of subcom bytes per record
+$::FILE='../examples/subcom.tgen'; # use this file for example subcom data
+
+counter   # 0 # 1 # 'L'   # $::I
+sub_index # 4 # 1 # 'S'   # ($::I * $::SUB_BYTES) % $::SUB_LENGTH
+sub_data  # 6 # 1 # 'a10' # subcom_file($::FILE,$P{sub_index}{value},10)
+
+# end of command file
+
